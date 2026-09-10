@@ -1,346 +1,516 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
-# Опционально: анализ фото
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except Exception:
-    CV2_AVAILABLE = False
-
-
-# -------------------------------------------------
-# 1. ДАННЫЕ И МОДЕЛЬ
-# -------------------------------------------------
-@st.cache_data
-def load_data() -> pd.DataFrame:
-    data = [
-        # metal, time_h, resin_type, capacity_mg_g
-
-        # Cobalt (Co)
-        ["Co", 0.5, 0, 11.52],
-        ["Co", 1.0, 0, 23.56],
-        ["Co", 1.5, 0, 36.34],
-        ["Co", 2.0, 0, 38.32],
-
-        ["Co", 0.5, 1, 25.43],
-        ["Co", 1.0, 1, 41.93],
-        ["Co", 1.5, 1, 62.87],
-        ["Co", 2.0, 1, 64.56],
-
-        # Copper (Cu)
-        ["Cu", 0.5, 0, 12.63],
-        ["Cu", 1.0, 0, 25.24],
-        ["Cu", 1.5, 0, 39.69],
-        ["Cu", 2.0, 0, 41.49],
-
-        ["Cu", 0.5, 1, 27.04],
-        ["Cu", 1.0, 1, 45.10],
-        ["Cu", 1.5, 1, 68.10],
-        ["Cu", 2.0, 1, 69.53],
-    ]
-    df = pd.DataFrame(data, columns=["metal", "time_h", "resin_type", "capacity_mg_g"])
-    df["metal_code"] = df["metal"].map({"Cu": 0, "Co": 1})
-    df["resin_name"] = df["resin_type"].map({
-        0: "Без угля",
-        1: "С активированным углём"
-    })
-    return df
-
-
-@st.cache_resource
-def train_model():
-    df = load_data()
-    X = df[["metal_code", "time_h", "resin_type"]]
-    y = df["capacity_mg_g"]
-
-    model = RandomForestRegressor(
-        n_estimators=250,
-        max_depth=6,
-        random_state=42
-    )
-    model.fit(X, y)
-    return model
-
-
-def predict_capacity(model, metal: str, time_h: float, resin_type: int) -> float:
-    metal_code = 0 if metal == "Cu" else 1
-    sample = pd.DataFrame([{
-        "metal_code": metal_code,
-        "time_h": time_h,
-        "resin_type": resin_type
-    }])
-    return float(model.predict(sample)[0])
-
-
-def calculate_required_mass(volume_l: float, concentration_mg_l: float, capacity_mg_g: float) -> float:
-    """m = (C * V) / q"""
-    total_metal_mg = volume_l * concentration_mg_l
-    return total_metal_mg / capacity_mg_g
-
-
-# -------------------------------------------------
-# 2. АНАЛИЗ ФОТО (ПРОТОТИП)
-# -------------------------------------------------
-def estimate_pollution_from_uploaded_image(uploaded_file):
-    if not CV2_AVAILABLE:
-        return None, "OpenCV не установлен. Для анализа фото установите opencv-python."
-
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    image_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if image_bgr is None:
-        return None, "Не удалось прочитать изображение."
-
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-
-    brightness = float(np.mean(gray))
-    contrast = float(np.std(gray))
-    mean_r = float(np.mean(image_rgb[:, :, 0]))
-    mean_g = float(np.mean(image_rgb[:, :, 1]))
-    mean_b = float(np.mean(image_rgb[:, :, 2]))
-
-    # Упрощённая логика для прототипа
-    if contrast < 30:
-        pollution_level = "Высокий"
-        estimated_concentration = 20.0
-    elif contrast < 50:
-        pollution_level = "Средний"
-        estimated_concentration = 10.0
-    else:
-        pollution_level = "Низкий"
-        estimated_concentration = 3.0
-
-    result = {
-        "image_rgb": image_rgb,
-        "brightness": brightness,
-        "contrast": contrast,
-        "mean_r": mean_r,
-        "mean_g": mean_g,
-        "mean_b": mean_b,
-        "pollution_level": pollution_level,
-        "estimated_concentration_mg_l": estimated_concentration
-    }
-    return result, None
-
-
-# -------------------------------------------------
-# 3. ГРАФИКИ
-# -------------------------------------------------
-def plot_experimental_curves(df: pd.DataFrame, metal: str):
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    subset = df[df["metal"] == metal].copy()
-
-    for resin_type, resin_label in [(0, "Без угля"), (1, "С активированным углём")]:
-        temp = subset[subset["resin_type"] == resin_type].sort_values("time_h")
-        ax.plot(temp["time_h"], temp["capacity_mg_g"], marker='o', label=resin_label)
-
-    ax.set_title(f"Экспериментальная сорбция для {metal}")
-    ax.set_xlabel("Время контакта, ч")
-    ax.set_ylabel("Сорбционная ёмкость, мг/г")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    return fig
-
-
-def plot_predicted_curve(model, metal: str, resin_type: int):
-    fig, ax = plt.subplots(figsize=(8, 5))
-    time_grid = np.linspace(0.5, 2.5, 60)
-
-    preds = [
-        predict_capacity(model, metal, float(t), resin_type)
-        for t in time_grid
-    ]
-
-    label = "С активированным углём" if resin_type == 1 else "Без угля"
-    ax.plot(time_grid, preds, label=f"Прогноз: {label}")
-    ax.set_title(f"Прогнозируемая кривая сорбции ({metal})")
-    ax.set_xlabel("Время контакта, ч")
-    ax.set_ylabel("Сорбционная ёмкость, мг/г")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    return fig
-
-
-# -------------------------------------------------
-# 4. ИНТЕРФЕЙС STREAMLIT
-# -------------------------------------------------
+# =========================================================
+# CONFIG
+# =========================================================
 st.set_page_config(
-    page_title="AI-система очистки воды",
+    page_title="Heavy Metal Adsorption AI",
     page_icon="💧",
     layout="wide"
 )
 
-st.title("💧 AI-система очистки воды с использованием биоразлагаемого сорбента")
-st.write(
-    "Прототип системы для прогнозирования сорбционной ёмкости и расчёта необходимой массы сорбента "
-    "на основе экспериментальных данных по Cu(II) и Co(II)."
+DATA_FILE = "Dataset. S.Lamsiah.xlsx"
+TARGET = "Adsorption capacity (mg/g)"
+
+CAT_FEATURES = ["Heavy metal"]
+
+NUM_FEATURES = [
+    "Activation temperature (°C)",
+    "Hydrated radius (nm)",
+    "Electronegativity (Pauling)",
+    "van der Waals radius (nm)",
+    "Molar mass (g/mol)",
+    "BET surface area (m²/g)",
+    "Pore diameter (nm)",
+    "Total pore volume (cm³/g)\n",
+    "Temperature (°C)",
+    "pH",
+    "Dose (g/L)",
+    "Contact time (min)",
+    "Initial concentration (mg/L)",
+]
+
+FEATURES = CAT_FEATURES + NUM_FEATURES
+
+# =========================================================
+# DATA
+# =========================================================
+@st.cache_data
+def load_data():
+    df = pd.read_excel(DATA_FILE)
+
+    required = FEATURES + [TARGET]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    return df
+
+
+# =========================================================
+# MODEL
+# =========================================================
+@st.cache_resource
+def train_model(df):
+    X = df[FEATURES].copy()
+    y = df[TARGET].copy()
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.20,
+        random_state=42
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            (
+                "metal",
+                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                CAT_FEATURES
+            )
+        ],
+        remainder="passthrough"
+    )
+
+    model = RandomForestRegressor(
+        n_estimators=500,
+        random_state=42,
+        n_jobs=-1
+    )
+
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("model", model)
+    ])
+
+    pipeline.fit(X_train, y_train)
+
+    y_pred = pipeline.predict(X_test)
+
+    metrics = {
+        "R2": r2_score(y_test, y_pred),
+        "MAE": mean_absolute_error(y_test, y_pred),
+        "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
+        "n_train": len(X_train),
+        "n_test": len(X_test)
+    }
+
+    test_results = X_test.copy()
+    test_results["Actual capacity (mg/g)"] = y_test.values
+    test_results["Predicted capacity (mg/g)"] = y_pred
+    test_results["Absolute error (mg/g)"] = np.abs(
+        test_results["Actual capacity (mg/g)"] -
+        test_results["Predicted capacity (mg/g)"]
+    )
+
+    return pipeline, metrics, test_results
+
+
+def get_feature_importance(pipeline):
+    pre = pipeline.named_steps["preprocessor"]
+    rf = pipeline.named_steps["model"]
+
+    feature_names = pre.get_feature_names_out()
+    importances = rf.feature_importances_
+
+    fi = pd.DataFrame({
+        "Feature": feature_names,
+        "Importance": importances
+    }).sort_values("Importance", ascending=False)
+
+    # Cleaner labels for display
+    fi["Feature"] = (
+        fi["Feature"]
+        .str.replace("metal__", "", regex=False)
+        .str.replace("remainder__", "", regex=False)
+    )
+    return fi
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+def median_for_metal(df, metal, column):
+    values = df.loc[df["Heavy metal"] == metal, column]
+    if len(values) == 0:
+        return float(df[column].median())
+    return float(values.median())
+
+
+def metal_constants(df, metal):
+    """Metal properties are constant in this dataset, so use median."""
+    cols = [
+        "Hydrated radius (nm)",
+        "Electronegativity (Pauling)",
+        "van der Waals radius (nm)",
+        "Molar mass (g/mol)",
+    ]
+    return {c: median_for_metal(df, metal, c) for c in cols}
+
+
+def predict_capacity(pipeline, row_dict):
+    sample = pd.DataFrame([row_dict], columns=FEATURES)
+    return float(pipeline.predict(sample)[0])
+
+
+def calculate_required_mass(volume_l, concentration_mg_l, capacity_mg_g):
+    """
+    Theoretical sorbent mass:
+        total metal (mg) = volume (L) * concentration (mg/L)
+        mass sorbent (g) = total metal (mg) / capacity (mg/g)
+
+    This is a simplified theoretical calculation.
+    """
+    if capacity_mg_g <= 0:
+        return np.nan
+    total_metal_mg = volume_l * concentration_mg_l
+    return total_metal_mg / capacity_mg_g
+
+
+# =========================================================
+# LOAD
+# =========================================================
+try:
+    df = load_data()
+except Exception as e:
+    st.error(
+        "Не удалось открыть Dataset. S.Lamsiah.xlsx. "
+        "Положите Excel-файл в ту же папку, что и app.py."
+    )
+    st.exception(e)
+    st.stop()
+
+pipeline, metrics, test_results = train_model(df)
+
+# =========================================================
+# HEADER
+# =========================================================
+st.title("💧 Интеллектуальная система прогнозирования очистки воды")
+st.caption(
+    "Machine Learning prototype for predicting heavy-metal adsorption capacity"
 )
 
-df = load_data()
-model = train_model()
+st.info(
+    "Модель обучена на открытом экспериментальном наборе данных. "
+    "Она предназначена для исследовательского прогнозирования и "
+    "не заменяет лабораторный анализ."
+)
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Расчёт очистки",
-    "Анализ фото воды",
-    "Графики",
-    "Исходные данные"
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🔮 Прогноз",
+    "📊 Качество модели",
+    "🧠 Важность признаков",
+    "🗂 Dataset",
+    "ℹ️ О системе"
 ])
 
+# =========================================================
+# TAB 1 — PREDICTION
+# =========================================================
 with tab1:
-    st.subheader("Расчёт необходимой массы сорбента")
+    st.subheader("Прогноз сорбционной ёмкости")
 
-    col1, col2 = st.columns(2)
+    metals = sorted(df["Heavy metal"].dropna().unique().tolist())
 
-    with col1:
-        metal = st.selectbox("Металл", ["Cu", "Co"])
-        volume_l = st.number_input("Объём воды, л", min_value=0.1, value=20.0, step=0.1)
-        concentration_mg_l = st.number_input("Концентрация загрязнения, мг/л", min_value=0.1, value=10.0, step=0.1)
+    c1, c2 = st.columns(2)
 
-    with col2:
-        time_h = st.slider("Время контакта, ч", min_value=0.5, max_value=3.0, value=2.0, step=0.1)
-        resin_name = st.selectbox("Тип сорбента", ["Без угля", "С активированным углём"])
-        resin_type = 0 if resin_name == "Без угля" else 1
+    with c1:
+        metal = st.selectbox("Тяжёлый металл", metals)
 
-    if st.button("Рассчитать", type="primary"):
-        capacity = predict_capacity(model, metal, time_h, resin_type)
-        required_mass = calculate_required_mass(volume_l, concentration_mg_l, capacity)
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Прогнозируемая сорбционная ёмкость", f"{capacity:.2f} мг/г")
-        c2.metric("Общий металл в воде", f"{volume_l * concentration_mg_l:.2f} мг")
-        c3.metric("Необходимая масса сорбента", f"{required_mass:.2f} г")
-
-        st.info(
-            f"При объёме **{volume_l:.1f} л**, концентрации **{concentration_mg_l:.1f} мг/л**, "
-            f"металле **{metal}** и времени **{time_h:.1f} ч** "
-            f"система прогнозирует ёмкость **{capacity:.2f} мг/г**."
+        activation_temp = st.number_input(
+            "Температура активации сорбента, °C",
+            value=median_for_metal(df, metal, "Activation temperature (°C)"),
+            step=10.0
         )
 
-        if resin_type == 1:
-            st.success("Модифицированный сорбент с активированным углём обычно показывает более высокую эффективность.")
-        else:
-            st.warning("Сорбент без угля работает, но обычно уступает модифицированному варианту.")
-
-        # Таблица результата
-        result_df = pd.DataFrame([{
-            "Металл": metal,
-            "Объём воды, л": volume_l,
-            "Концентрация, мг/л": concentration_mg_l,
-            "Время, ч": time_h,
-            "Тип сорбента": resin_name,
-            "Сорбционная ёмкость, мг/г": round(capacity, 2),
-            "Масса сорбента, г": round(required_mass, 2)
-        }])
-
-        st.download_button(
-            label="Скачать результат CSV",
-            data=result_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="water_purification_result.csv",
-            mime="text/csv"
+        bet = st.number_input(
+            "BET surface area, m²/g",
+            min_value=0.0,
+            value=max(0.0, median_for_metal(df, metal, "BET surface area (m²/g)")),
+            step=10.0
         )
 
+        pore_diameter = st.number_input(
+            "Диаметр пор, nm",
+            min_value=0.0,
+            value=max(0.0, median_for_metal(df, metal, "Pore diameter (nm)")),
+            step=0.1
+        )
+
+        pore_volume = st.number_input(
+            "Общий объём пор, cm³/g",
+            min_value=0.0,
+            value=max(0.0, median_for_metal(df, metal, "Total pore volume (cm³/g)\n")),
+            step=0.01,
+            format="%.3f"
+        )
+
+    with c2:
+        temperature = st.number_input(
+            "Температура эксперимента, °C",
+            value=median_for_metal(df, metal, "Temperature (°C)"),
+            step=1.0
+        )
+
+        ph = st.number_input(
+            "pH",
+            min_value=0.0,
+            max_value=14.0,
+            value=float(np.clip(median_for_metal(df, metal, "pH"), 0, 14)),
+            step=0.1
+        )
+
+        dose = st.number_input(
+            "Доза сорбента, g/L",
+            min_value=0.001,
+            value=max(0.001, median_for_metal(df, metal, "Dose (g/L)")),
+            step=0.1
+        )
+
+        contact_time = st.number_input(
+            "Время контакта, min",
+            min_value=0.1,
+            value=max(0.1, median_for_metal(df, metal, "Contact time (min)")),
+            step=1.0
+        )
+
+        initial_concentration = st.number_input(
+            "Начальная концентрация, mg/L",
+            min_value=0.1,
+            value=max(0.1, median_for_metal(df, metal, "Initial concentration (mg/L)")),
+            step=1.0
+        )
+
+    constants = metal_constants(df, metal)
+
+    with st.expander("Физико-химические свойства выбранного металла"):
+        st.write(
+            {
+                "Hydrated radius (nm)": round(constants["Hydrated radius (nm)"], 4),
+                "Electronegativity (Pauling)": round(constants["Electronegativity (Pauling)"], 4),
+                "van der Waals radius (nm)": round(constants["van der Waals radius (nm)"], 4),
+                "Molar mass (g/mol)": round(constants["Molar mass (g/mol)"], 4),
+            }
+        )
+
+    row = {
+        "Heavy metal": metal,
+        "Activation temperature (°C)": activation_temp,
+        "Hydrated radius (nm)": constants["Hydrated radius (nm)"],
+        "Electronegativity (Pauling)": constants["Electronegativity (Pauling)"],
+        "van der Waals radius (nm)": constants["van der Waals radius (nm)"],
+        "Molar mass (g/mol)": constants["Molar mass (g/mol)"],
+        "BET surface area (m²/g)": bet,
+        "Pore diameter (nm)": pore_diameter,
+        "Total pore volume (cm³/g)\n": pore_volume,
+        "Temperature (°C)": temperature,
+        "pH": ph,
+        "Dose (g/L)": dose,
+        "Contact time (min)": contact_time,
+        "Initial concentration (mg/L)": initial_concentration,
+    }
+
+    st.markdown("#### Дополнительный расчёт массы сорбента")
+    m1, m2 = st.columns(2)
+    with m1:
+        water_volume = st.number_input(
+            "Объём воды, L",
+            min_value=0.1,
+            value=10.0,
+            step=0.5
+        )
+    with m2:
+        use_same_concentration = st.checkbox(
+            "Использовать начальную концентрацию выше",
+            value=True
+        )
+
+    if st.button("Рассчитать прогноз", type="primary"):
+        predicted_capacity = predict_capacity(pipeline, row)
+
+        concentration_for_mass = (
+            initial_concentration if use_same_concentration
+            else st.session_state.get("manual_concentration", initial_concentration)
+        )
+
+        required_mass = calculate_required_mass(
+            water_volume,
+            concentration_for_mass,
+            predicted_capacity
+        )
+
+        r1, r2, r3 = st.columns(3)
+        r1.metric(
+            "Прогноз сорбционной ёмкости",
+            f"{predicted_capacity:.2f} mg/g"
+        )
+        r2.metric(
+            "Металл в воде",
+            f"{water_volume * concentration_for_mass:.2f} mg"
+        )
+        r3.metric(
+            "Теоретическая масса сорбента",
+            f"{required_mass:.2f} g"
+        )
+
+        st.warning(
+            "Расчёт массы сорбента является теоретическим: он предполагает, "
+            "что прогнозируемая сорбционная ёмкость полностью реализуется. "
+            "Для практического применения требуется лабораторная проверка."
+        )
+
+
+# =========================================================
+# TAB 2 — METRICS
+# =========================================================
 with tab2:
-    st.subheader("Прототип оценки загрязнения по фото")
-    st.caption("Это демонстрационный модуль. Он не заменяет лабораторный анализ и даёт ориентировочную оценку.")
+    st.subheader("Оценка модели на тестовой выборке")
 
-    uploaded_file = st.file_uploader("Загрузите фото воды", type=["jpg", "jpeg", "png"])
+    st.write(
+        f"Dataset: **{len(df)} наблюдений**. "
+        f"Обучение: **{metrics['n_train']}**, тест: **{metrics['n_test']}**."
+    )
 
-    if uploaded_file is not None:
-        result, error = estimate_pollution_from_uploaded_image(uploaded_file)
+    a, b, c = st.columns(3)
+    a.metric("R²", f"{metrics['R2']:.3f}")
+    b.metric("MAE", f"{metrics['MAE']:.2f} mg/g")
+    c.metric("RMSE", f"{metrics['RMSE']:.2f} mg/g")
 
-        if error:
-            st.error(error)
-        else:
-            st.image(result["image_rgb"], caption="Загруженное изображение", use_container_width=True)
+    st.caption(
+        "Разделение выполнено случайно в пропорции 80/20 с random_state=42. "
+        "Эти показатели относятся только к данной схеме тестирования."
+    )
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Яркость", f"{result['brightness']:.2f}")
-            c2.metric("Контраст", f"{result['contrast']:.2f}")
-            c3.metric("Оценка загрязнения", result["pollution_level"])
+    # Actual vs predicted chart
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(
+        test_results["Actual capacity (mg/g)"],
+        test_results["Predicted capacity (mg/g)"],
+        alpha=0.7
+    )
+    min_v = min(
+        test_results["Actual capacity (mg/g)"].min(),
+        test_results["Predicted capacity (mg/g)"].min()
+    )
+    max_v = max(
+        test_results["Actual capacity (mg/g)"].max(),
+        test_results["Predicted capacity (mg/g)"].max()
+    )
+    ax.plot([min_v, max_v], [min_v, max_v], linestyle="--")
+    ax.set_xlabel("Actual capacity, mg/g")
+    ax.set_ylabel("Predicted capacity, mg/g")
+    ax.set_title("Actual vs Predicted")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
 
-            st.write(
-                f"Ориентировочная концентрация загрязнения: **{result['estimated_concentration_mg_l']:.1f} мг/л**"
-            )
+    st.markdown("#### Примеры прогнозов")
+    st.dataframe(
+        test_results[
+            [
+                "Heavy metal",
+                "Contact time (min)",
+                "Initial concentration (mg/L)",
+                "Actual capacity (mg/g)",
+                "Predicted capacity (mg/g)",
+                "Absolute error (mg/g)"
+            ]
+        ].head(30),
+        use_container_width=True
+    )
 
-            st.write("Средние значения RGB:")
-            st.write(
-                f"R = {result['mean_r']:.1f}, "
-                f"G = {result['mean_g']:.1f}, "
-                f"B = {result['mean_b']:.1f}"
-            )
 
-            st.info(
-                "Эту оценку можно подставить во вкладке «Расчёт очистки» как примерную концентрацию загрязнения."
-            )
-
+# =========================================================
+# TAB 3 — FEATURE IMPORTANCE
+# =========================================================
 with tab3:
-    st.subheader("Графики и визуализация")
+    st.subheader("Какие признаки сильнее влияют на прогноз")
 
-    left, right = st.columns(2)
+    fi = get_feature_importance(pipeline)
+    st.dataframe(fi, use_container_width=True)
 
-    with left:
-        metal_for_plot = st.selectbox("Выберите металл для графика", ["Cu", "Co"], key="plot_metal_1")
-        fig1 = plot_experimental_curves(df, metal_for_plot)
-        st.pyplot(fig1)
+    top = fi.head(12).sort_values("Importance")
 
-    with right:
-        metal_for_pred = st.selectbox("Выберите металл для прогноза", ["Cu", "Co"], key="plot_metal_2")
-        resin_for_pred = st.selectbox("Выберите сорбент", ["Без угля", "С активированным углём"], key="plot_resin_2")
-        resin_for_pred_code = 0 if resin_for_pred == "Без угля" else 1
-        fig2 = plot_predicted_curve(model, metal_for_pred, resin_for_pred_code)
-        st.pyplot(fig2)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.barh(top["Feature"], top["Importance"])
+    ax.set_xlabel("Feature importance")
+    ax.set_title("Random Forest feature importance")
+    ax.grid(True, axis="x", alpha=0.3)
+    st.pyplot(fig)
 
-    st.markdown("### Важность признаков")
-    importances = model.feature_importances_
-    feature_names = ["Тип металла", "Время контакта", "Тип сорбента"]
+    st.caption(
+        "Feature importance показывает, насколько часто и насколько полезно "
+        "Random Forest использовал признак при построении деревьев. "
+        "Это не доказывает причинно-следственную связь."
+    )
 
-    fi_df = pd.DataFrame({
-        "Признак": feature_names,
-        "Важность": importances
-    }).sort_values("Важность", ascending=False)
 
-    st.dataframe(fi_df, use_container_width=True)
-
-    fig3, ax3 = plt.subplots(figsize=(7, 4))
-    ax3.bar(fi_df["Признак"], fi_df["Важность"])
-    ax3.set_title("Важность признаков в модели")
-    ax3.set_ylabel("Важность")
-    ax3.grid(True, alpha=0.3)
-    st.pyplot(fig3)
-
+# =========================================================
+# TAB 4 — DATASET
+# =========================================================
 with tab4:
-    st.subheader("Исходные экспериментальные данные")
-    st.dataframe(df[["metal", "time_h", "resin_name", "capacity_mg_g"]], use_container_width=True)
+    st.subheader("Открытый экспериментальный набор данных")
 
-    st.markdown("### Что принимает система на вход")
+    st.write(f"Количество записей: **{len(df)}**")
+    st.write(f"Количество металлов: **{df['Heavy metal'].nunique()}**")
+
+    counts = (
+        df["Heavy metal"]
+        .value_counts()
+        .rename_axis("Heavy metal")
+        .reset_index(name="Number of observations")
+    )
+    st.dataframe(counts, use_container_width=True)
+
+    st.markdown("#### Фрагмент исходных данных")
+    st.dataframe(df.head(100), use_container_width=True)
+
+    st.download_button(
+        "Скачать подготовленный CSV",
+        data=df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="heavy_metal_adsorption_dataset.csv",
+        mime="text/csv"
+    )
+
+
+# =========================================================
+# TAB 5 — ABOUT
+# =========================================================
+with tab5:
+    st.subheader("Архитектура системы")
+
     st.markdown(
         """
-        - тип металла (**Cu** или **Co**)
-        - объём воды, л
-        - концентрация загрязнения, мг/л
-        - время контакта, ч
-        - тип сорбента (**без угля** / **с активированным углём**)
+**1. Источник данных**  
+Открытые экспериментальные данные по адсорбции тяжёлых металлов активированным углём.
+
+**2. Подготовка данных**  
+Категориальный признак `Heavy metal` кодируется автоматически.  
+Числовые экспериментальные и физико-химические параметры передаются модели без масштабирования.
+
+**3. Модель**  
+`RandomForestRegressor` из библиотеки scikit-learn.
+
+**4. Выход модели**  
+Прогноз `Adsorption capacity (mg/g)`.
+
+**5. Веб-интерфейс**  
+Streamlit позволяет вводить условия эксперимента и получать прогноз без работы непосредственно с Python-кодом.
         """
     )
 
-    st.markdown("### Что система выдаёт на выход")
-    st.markdown(
-        """
-        - прогнозируемую сорбционную ёмкость, мг/г
-        - общий объём загрязнения в воде, мг
-        - необходимую массу сорбента, г
-        """
+    st.warning(
+        "Ограничение: высокая точность на случайном train/test split не означает, "
+        "что модель с такой же точностью будет работать для совершенно нового "
+        "сорбента или данных из новой лаборатории. Для этого нужна независимая валидация."
     )
-
-st.markdown("---")
-st.caption(
-    "Важно: модель обучена на небольшом наборе экспериментальных данных и предназначена "
-    "для демонстрации концепции интеллектуальной системы очистки воды."
-)
