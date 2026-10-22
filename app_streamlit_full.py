@@ -1,628 +1,805 @@
-import streamlit as st
-import pandas as pd
+
+from pathlib import Path
+from io import BytesIO
+
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
+import streamlit as st
 
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import GradientBoostingRegressor
 
-# =========================================================
-# CONFIG
-# =========================================================
+from openpyxl.styles import Font, PatternFill, Alignment
+
+
+# ======================================================
+# WATERFILTER AI
+# ======================================================
+
 st.set_page_config(
-    page_title="Heavy Metal Adsorption AI",
+    page_title="WaterFilter AI",
     page_icon="💧",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 DATA_FILE = "Dataset. S.Lamsiah.xlsx"
 TARGET = "Adsorption capacity (mg/g)"
 
-CAT_FEATURES = ["Heavy metal"]
-
-NUM_FEATURES = [
-    "Activation temperature (°C)",
-    "Hydrated radius (nm)",
-    "Electronegativity (Pauling)",
-    "van der Waals radius (nm)",
-    "Molar mass (g/mol)",
+FEATURES = [
+    "Dose (g/L)",
+    "Initial concentration (mg/L)",
+    "Contact time (min)",
+    "pH",
     "BET surface area (m²/g)",
     "Pore diameter (nm)",
-    "Total pore volume (cm³/g)\n",
+    "Total pore volume (cm³/g)",
+    "Activation temperature (°C)",
+    "van der Waals radius (nm)",
     "Temperature (°C)",
-    "pH",
-    "Dose (g/L)",
-    "Contact time (min)",
-    "Initial concentration (mg/L)",
+    "Molar mass (g/mol)",
+    "Hydrated radius (nm)",
+    "Electronegativity (Pauling)"
 ]
 
-FEATURES = CAT_FEATURES + NUM_FEATURES
+METAL_PROPERTIES = [
+    "van der Waals radius (nm)",
+    "Molar mass (g/mol)",
+    "Hydrated radius (nm)",
+    "Electronegativity (Pauling)"
+]
 
-# =========================================================
-# DATA
-# =========================================================
-@st.cache_data
-def load_data():
-    df = pd.read_excel(DATA_FILE)
+USER_FEATURES = [
+    feature for feature in FEATURES
+    if feature not in METAL_PROPERTIES
+]
 
-    required = FEATURES + [TARGET]
-    missing = [c for c in required if c not in df.columns]
+
+# ======================================================
+# DESIGN
+# ======================================================
+
+st.markdown("""
+<style>
+
+/* MAIN BACKGROUND */
+
+.stApp {
+    background-color: #F4F8FD;
+}
+
+.block-container {
+    max-width: 1120px;
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+}
+
+/* TITLES */
+
+h1, h2, h3 {
+    color: #173D67 !important;
+    font-family: Arial, sans-serif;
+}
+
+/* HEADER */
+
+.app-header {
+    background: linear-gradient(
+        120deg,
+        #163F70,
+        #28699E
+    );
+    padding: 30px 35px;
+    border-radius: 15px;
+    margin-bottom: 26px;
+}
+
+.app-title {
+    color: #FFFFFF;
+    font-size: 36px;
+    font-weight: 750;
+    margin-bottom: 6px;
+}
+
+.app-subtitle {
+    color: #DCEAF8;
+    font-size: 16px;
+    margin: 0;
+}
+
+/* FORM */
+
+div[data-testid="stForm"] {
+    background-color: #FFFFFF;
+    border: 1px solid #B8D0E8;
+    border-radius: 15px;
+    padding: 24px;
+}
+
+div[data-testid="stWidgetLabel"] p {
+    color: #244B73;
+    font-weight: 500;
+}
+
+/* INPUTS */
+
+div[data-baseweb="input"] {
+    border-radius: 8px;
+}
+
+div[data-baseweb="select"] {
+    border-radius: 8px;
+}
+
+/* BUTTON */
+
+div.stFormSubmitButton button[kind="primary"] {
+    background-color: #245A91;
+    border: 1px solid #245A91;
+    color: white;
+    border-radius: 9px;
+    height: 52px;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+div.stFormSubmitButton button[kind="primary"]:hover {
+    background-color: #173D67;
+    border-color: #173D67;
+    color: white;
+}
+
+/* RESULT */
+
+div[data-testid="stMetric"] {
+    background: #FFFFFF;
+    border: 1px solid #B8D0E8;
+    border-radius: 12px;
+    padding: 22px;
+}
+
+div[data-testid="stMetricLabel"] {
+    color: #496B8D;
+}
+
+div[data-testid="stMetricValue"] {
+    color: #174C83;
+    font-size: 32px;
+    font-weight: 700;
+}
+
+/* DOWNLOAD */
+
+div.stDownloadButton button {
+    background-color: #FFFFFF;
+    color: #245A91;
+    border: 1px solid #245A91;
+    border-radius: 9px;
+    min-height: 50px;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+div.stDownloadButton button:hover {
+    color: #173D67;
+    border-color: #173D67;
+    background-color: #EAF2FA;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# ======================================================
+# LOAD DATASET
+# ======================================================
+
+def find_dataset():
+
+    folder = Path(__file__).resolve().parent
+
+    preferred = folder / DATA_FILE
+
+    if preferred.exists():
+        return preferred
+
+    files = sorted(folder.glob("Dataset*.xlsx"))
+
+    if files:
+        return files[0]
+
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def load_data(path, version):
+
+    data = pd.read_excel(path)
+
+    data.columns = (
+        data.columns.astype(str).str.strip()
+    )
+
+    required = FEATURES + [TARGET, "Heavy metal"]
+
+    missing = [
+        col for col in required
+        if col not in data.columns
+    ]
+
     if missing:
-        raise ValueError(f"Missing columns: {missing}")
+        raise ValueError(
+            "Missing columns: " + ", ".join(missing)
+        )
 
-    return df
+    for col in FEATURES + [TARGET]:
+        data[col] = pd.to_numeric(
+            data[col],
+            errors="raise"
+        )
 
-
-# =========================================================
-# MODEL
-# =========================================================
-@st.cache_resource
-def train_model(df):
-    X = df[FEATURES].copy()
-    y = df[TARGET].copy()
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.20,
-        random_state=42
+    values = data[FEATURES + [TARGET]].to_numpy(
+        dtype=float
     )
 
-    preprocessor = ColumnTransformer(
-        transformers=[
-            (
-                "metal",
-                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
-                CAT_FEATURES
-            )
-        ],
-        remainder="passthrough"
-    )
+    if not np.isfinite(values).all():
+        raise ValueError(
+            "Dataset contains invalid numerical values."
+        )
 
-    model = RandomForestRegressor(
-        n_estimators=500,
+    if len(data) != 1528:
+        raise ValueError(
+            f"Expected 1528 records, found {len(data)}."
+        )
+
+    return data
+
+
+# ======================================================
+# GRADIENT BOOSTING MODEL
+# ======================================================
+
+@st.cache_resource(
+    show_spinner="Подготовка модели Gradient Boosting..."
+)
+def train_model(path, version):
+
+    data = load_data(path, version)
+
+    regressor = GradientBoostingRegressor(
+        n_estimators=150,
+        learning_rate=0.10,
+        max_depth=15,
+        subsample=0.7,
+        max_features=0.7,
+        min_samples_split=10,
+        min_samples_leaf=6,
+        loss="squared_error",
         random_state=42,
-        n_jobs=-1
+        validation_fraction=0.15,
+        n_iter_no_change=20,
+        tol=0.001
     )
 
     pipeline = Pipeline([
-        ("preprocessor", preprocessor),
-        ("model", model)
+        ("scaler", StandardScaler()),
+        ("model", regressor)
     ])
 
-    pipeline.fit(X_train, y_train)
-
-    y_pred = pipeline.predict(X_test)
-
-    metrics = {
-        "R2": r2_score(y_test, y_pred),
-        "MAE": mean_absolute_error(y_test, y_pred),
-        "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
-        "n_train": len(X_train),
-        "n_test": len(X_test)
-    }
-
-    test_results = X_test.copy()
-    test_results["Actual capacity (mg/g)"] = y_test.values
-    test_results["Predicted capacity (mg/g)"] = y_pred
-    test_results["Absolute error (mg/g)"] = np.abs(
-        test_results["Actual capacity (mg/g)"] -
-        test_results["Predicted capacity (mg/g)"]
+    pipeline.fit(
+        data[FEATURES],
+        data[TARGET]
     )
 
-    return pipeline, metrics, test_results
+    return pipeline
 
 
-def get_feature_importance(pipeline):
-    pre = pipeline.named_steps["preprocessor"]
-    rf = pipeline.named_steps["model"]
+dataset_path = find_dataset()
 
-    feature_names = pre.get_feature_names_out()
-    importances = rf.feature_importances_
+if dataset_path is None:
 
-    fi = pd.DataFrame({
-        "Feature": feature_names,
-        "Importance": importances
-    }).sort_values("Importance", ascending=False)
-
-    # Cleaner labels for display
-    fi["Feature"] = (
-        fi["Feature"]
-        .str.replace("metal__", "", regex=False)
-        .str.replace("remainder__", "", regex=False)
-    )
-    return fi
-
-
-# =========================================================
-# HELPERS
-# =========================================================
-def median_for_metal(df, metal, column):
-    values = df.loc[df["Heavy metal"] == metal, column]
-    if len(values) == 0:
-        return float(df[column].median())
-    return float(values.median())
-
-
-def metal_constants(df, metal):
-    """Metal properties are constant in this dataset, so use median."""
-    cols = [
-        "Hydrated radius (nm)",
-        "Electronegativity (Pauling)",
-        "van der Waals radius (nm)",
-        "Molar mass (g/mol)",
-    ]
-    return {c: median_for_metal(df, metal, c) for c in cols}
-
-
-def predict_capacity(pipeline, row_dict):
-    sample = pd.DataFrame([row_dict], columns=FEATURES)
-    return float(pipeline.predict(sample)[0])
-
-
-def calculate_required_mass(volume_l, concentration_mg_l, capacity_mg_g):
-    """
-    Theoretical sorbent mass:
-        total metal (mg) = volume (L) * concentration (mg/L)
-        mass sorbent (g) = total metal (mg) / capacity (mg/g)
-
-    This is a simplified theoretical calculation.
-    """
-    if capacity_mg_g <= 0:
-        return np.nan
-    total_metal_mg = volume_l * concentration_mg_l
-    return total_metal_mg / capacity_mg_g
-
-
-# =========================================================
-# LOAD
-# =========================================================
-try:
-    df = load_data()
-except Exception as e:
     st.error(
-        "Не удалось открыть Dataset. S.Lamsiah.xlsx. "
-        "Положите Excel-файл в ту же папку, что и app.py."
+        "Не найден файл Dataset. S.Lamsiah.xlsx"
     )
-    st.exception(e)
     st.stop()
 
-pipeline, metrics, test_results = train_model(df)
+try:
 
-# =========================================================
-# HEADER
-# =========================================================
-st.title("💧 Интеллектуальная система прогнозирования очистки воды")
-st.caption(
-    ""
-)
+    version = dataset_path.stat().st_mtime_ns
 
-st.info(
-    ""
-)
+    df = load_data(
+        str(dataset_path),
+        version
+    )
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    " Прогноз",
-    " Качество модели",
-    " Важность признаков",
-    " Dataset",
-    " Наш эксперимент",
-    " О системе"
-])
+    model = train_model(
+        str(dataset_path),
+        version
+    )
 
-# =========================================================
-# TAB 1 — PREDICTION
-# =========================================================
-with tab1:
-    st.subheader("Прогноз сорбционной ёмкости")
+except Exception:
 
-    metals = sorted(df["Heavy metal"].dropna().unique().tolist())
+    st.error(
+        "Ошибка загрузки данных или модели."
+    )
+    st.stop()
 
-    c1, c2 = st.columns(2)
 
-    with c1:
-        metal = st.selectbox("Тяжёлый металл", metals)
+# ======================================================
+# DEFAULT VALUES
+# ======================================================
 
-        activation_temp = st.number_input(
-            "Температура активации сорбента, °C",
-            value=median_for_metal(df, metal, "Activation temperature (°C)"),
-            step=10.0
-        )
+def get_default_row(metal):
 
-        bet = st.number_input(
-            "BET surface area, m²/g",
-            min_value=0.0,
-            value=max(0.0, median_for_metal(df, metal, "BET surface area (m²/g)")),
-            step=10.0
-        )
+    metal_data = df.loc[
+        df["Heavy metal"] == metal
+    ].copy()
 
-        pore_diameter = st.number_input(
-            "Диаметр пор, nm",
-            min_value=0.0,
-            value=max(0.0, median_for_metal(df, metal, "Pore diameter (nm)")),
-            step=0.1
-        )
+    # Для каждого параметра определяем медиану
+    medians = metal_data[USER_FEATURES].median()
 
-        pore_volume = st.number_input(
-            "Общий объём пор, cm³/g",
-            min_value=0.0,
-            value=max(0.0, median_for_metal(df, metal, "Total pore volume (cm³/g)\n")),
-            step=0.01,
-            format="%.3f"
-        )
+    # Масштабируем отклонения для сравнения
+    spread = (
+        metal_data[USER_FEATURES].quantile(0.75)
+        - metal_data[USER_FEATURES].quantile(0.25)
+    )
 
-    with c2:
-        temperature = st.number_input(
-            "Температура эксперимента, °C",
-            value=median_for_metal(df, metal, "Temperature (°C)"),
-            step=1.0
-        )
+    spread = spread.replace(0, 1.0)
 
-        ph = st.number_input(
-            "pH",
-            min_value=0.0,
-            max_value=14.0,
-            value=float(np.clip(median_for_metal(df, metal, "pH"), 0, 14)),
-            step=0.1
-        )
+    # Ищем одно наиболее типичное наблюдение
+    distances = (
+        metal_data[USER_FEATURES]
+        .sub(medians)
+        .abs()
+        .div(spread)
+        .sum(axis=1)
+    )
 
-        dose = st.number_input(
-            "Доза сорбента, g/L",
-            min_value=0.001,
-            value=max(0.001, median_for_metal(df, metal, "Dose (g/L)")),
-            step=0.1
-        )
+    closest_index = distances.idxmin()
 
-        contact_time = st.number_input(
-            "Время контакта, min",
-            min_value=0.1,
-            value=max(0.1, median_for_metal(df, metal, "Contact time (min)")),
-            step=1.0
-        )
+    # Возвращаем всю строку одного эксперимента
+    return metal_data.loc[closest_index]
 
-        initial_concentration = st.number_input(
-            "Начальная концентрация, mg/L",
-            min_value=0.1,
-            value=max(0.1, median_for_metal(df, metal, "Initial concentration (mg/L)")),
-            step=1.0
-        )
 
-    constants = metal_constants(df, metal)
+def get_metal_properties(metal):
 
-    with st.expander("Физико-химические свойства выбранного металла"):
-        st.write(
-            {
-                "Hydrated radius (nm)": round(constants["Hydrated radius (nm)"], 4),
-                "Electronegativity (Pauling)": round(constants["Electronegativity (Pauling)"], 4),
-                "van der Waals radius (nm)": round(constants["van der Waals radius (nm)"], 4),
-                "Molar mass (g/mol)": round(constants["Molar mass (g/mol)"], 4),
-            }
-        )
+    subset = df.loc[
+        df["Heavy metal"] == metal
+    ]
 
-    row = {
-        "Heavy metal": metal,
-        "Activation temperature (°C)": activation_temp,
-        "Hydrated radius (nm)": constants["Hydrated radius (nm)"],
-        "Electronegativity (Pauling)": constants["Electronegativity (Pauling)"],
-        "van der Waals radius (nm)": constants["van der Waals radius (nm)"],
-        "Molar mass (g/mol)": constants["Molar mass (g/mol)"],
-        "BET surface area (m²/g)": bet,
-        "Pore diameter (nm)": pore_diameter,
-        "Total pore volume (cm³/g)\n": pore_volume,
-        "Temperature (°C)": temperature,
-        "pH": ph,
-        "Dose (g/L)": dose,
-        "Contact time (min)": contact_time,
-        "Initial concentration (mg/L)": initial_concentration,
+    return {
+        feature: float(subset[feature].median())
+        for feature in METAL_PROPERTIES
     }
 
-    st.markdown("#### Дополнительный расчёт массы сорбента")
-    m1, m2 = st.columns(2)
-    with m1:
+
+def input_field(
+    label,
+    feature,
+    key,
+    default_row,
+    metal,
+    minimum,
+    step,
+    fmt="%.2f",
+    maximum=None
+):
+
+    default_value = max(
+        minimum,
+        float(default_row[feature])
+    )
+
+    if maximum is not None:
+        default_value = min(
+            default_value,
+            maximum
+        )
+
+    return st.number_input(
+        label,
+        min_value=float(minimum),
+        max_value=(
+            float(maximum)
+            if maximum is not None
+            else None
+        ),
+        value=float(default_value),
+        step=float(step),
+        format=fmt,
+        key=f"{metal}_{key}"
+    )
+
+
+# ======================================================
+# EXCEL EXPORT
+# ======================================================
+
+def create_excel(record):
+
+    output = BytesIO()
+
+    data = pd.DataFrame([record])
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        data.to_excel(
+            writer,
+            index=False,
+            sheet_name="Результат"
+        )
+
+        sheet = writer.sheets["Результат"]
+
+        # Header formatting
+        blue_fill = PatternFill(
+            start_color="245A91",
+            end_color="245A91",
+            fill_type="solid"
+        )
+
+        white_font = Font(
+            color="FFFFFF",
+            bold=True
+        )
+
+        for cell in sheet[1]:
+            cell.fill = blue_fill
+            cell.font = white_font
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+
+        sheet.row_dimensions[1].height = 38
+        sheet.freeze_panes = "A2"
+
+        for column in sheet.columns:
+
+            letter = column[0].column_letter
+
+            width = max(
+                len(str(cell.value or ""))
+                for cell in column
+            )
+
+            sheet.column_dimensions[letter].width = min(
+                max(width + 3, 16),
+                40
+            )
+
+    return output.getvalue()
+
+
+# ======================================================
+# HEADER
+# ======================================================
+
+st.markdown("""
+<div class="app-header">
+    <div class="app-title">WaterFilter AI</div>
+    <p class="app-subtitle">
+        Прогнозирование сорбционной ёмкости
+        активированного угля
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ======================================================
+# METAL SELECTION
+# ======================================================
+
+metals = sorted(
+    df["Heavy metal"].dropna().unique().tolist()
+)
+
+metal = st.selectbox(
+    "Загрязнитель",
+    metals,
+    key="selected_metal"
+)
+
+default_row = get_default_row(metal)
+
+
+# ======================================================
+# INPUT FORM
+# ======================================================
+
+with st.form("prediction_form"):
+
+    left, right = st.columns(
+        2,
+        gap="large"
+    )
+
+    # ----------------------------------
+    # LEFT COLUMN — WATER
+    # ----------------------------------
+
+    with left:
+
+        st.subheader("Параметры воды")
+
+        concentration = input_field(
+            "Концентрация металла, мг/л",
+            "Initial concentration (mg/L)",
+            "concentration",
+            default_row,
+            metal,
+            0.001,
+            1.0,
+            "%.3f"
+        )
+
         water_volume = st.number_input(
-            "Объём воды, L",
-            min_value=0.1,
+            "Объём воды, л",
+            min_value=0.01,
             value=10.0,
-            step=0.5
-        )
-    with m2:
-        use_same_concentration = st.checkbox(
-            "Использовать начальную концентрацию выше",
-            value=True
+            step=1.0,
+            format="%.2f"
         )
 
-    if st.button("Рассчитать прогноз", type="primary"):
-        predicted_capacity = predict_capacity(pipeline, row)
-
-        concentration_for_mass = (
-            initial_concentration if use_same_concentration
-            else st.session_state.get("manual_concentration", initial_concentration)
+        ph = input_field(
+            "pH воды",
+            "pH",
+            "ph",
+            default_row,
+            metal,
+            0.0,
+            0.1,
+            "%.2f",
+            14.0
         )
 
-        required_mass = calculate_required_mass(
-            water_volume,
-            concentration_for_mass,
-            predicted_capacity
+        temperature = input_field(
+            "Температура воды, °C",
+            "Temperature (°C)",
+            "temperature",
+            default_row,
+            metal,
+            0.0,
+            1.0
         )
 
-        r1, r2, r3 = st.columns(3)
-        r1.metric(
-            "Прогноз сорбционной ёмкости",
-            f"{predicted_capacity:.2f} mg/g"
-        )
-        r2.metric(
-            "Металл в воде",
-            f"{water_volume * concentration_for_mass:.2f} mg"
-        )
-        r3.metric(
-            "Теоретическая масса сорбента",
-            f"{required_mass:.2f} g"
+        contact_time = input_field(
+            "Время контакта, мин",
+            "Contact time (min)",
+            "contact_time",
+            default_row,
+            metal,
+            0.1,
+            1.0
         )
 
-        st.warning(
-            ""
-            " "
-            ""
+        target_removal = st.number_input(
+            "Планируемая доля удаления, %",
+            min_value=1,
+            max_value=100,
+            value=90,
+            step=1
         )
 
+    # ----------------------------------
+    # RIGHT COLUMN — SORBENT
+    # ----------------------------------
 
-# =========================================================
-# TAB 2 — METRICS
-# =========================================================
-with tab2:
-    st.subheader("Оценка модели на тестовой выборке")
+    with right:
 
-    st.write(
-        f"Dataset: **{len(df)} наблюдений**. "
-        f"Обучение: **{metrics['n_train']}**, тест: **{metrics['n_test']}**."
-    )
+        st.subheader(
+            "Характеристики активированного угля"
+        )
 
-    a, b, c = st.columns(3)
-    a.metric("R²", f"{metrics['R2']:.3f}")
-    b.metric("MAE", f"{metrics['MAE']:.2f} mg/g")
-    c.metric("RMSE", f"{metrics['RMSE']:.2f} mg/g")
+        dose = input_field(
+            "Дозировка угля, г/л",
+            "Dose (g/L)",
+            "dose",
+            default_row,
+            metal,
+            0.001,
+            0.1,
+            "%.3f"
+        )
 
-    st.caption(
-        "Разделение выполнено случайно в пропорции 80/20 с random_state=42. "
-        "Эти показатели относятся только к данной схеме тестирования."
-    )
+        bet = input_field(
+            "Площадь поверхности BET, м²/г",
+            "BET surface area (m²/g)",
+            "bet",
+            default_row,
+            metal,
+            0.001,
+            10.0
+        )
 
-    # Actual vs predicted chart
-    fig, ax = plt.subplots(figsize=(7, 5))
-    ax.scatter(
-        test_results["Actual capacity (mg/g)"],
-        test_results["Predicted capacity (mg/g)"],
-        alpha=0.7
-    )
-    min_v = min(
-        test_results["Actual capacity (mg/g)"].min(),
-        test_results["Predicted capacity (mg/g)"].min()
-    )
-    max_v = max(
-        test_results["Actual capacity (mg/g)"].max(),
-        test_results["Predicted capacity (mg/g)"].max()
-    )
-    ax.plot([min_v, max_v], [min_v, max_v], linestyle="--")
-    ax.set_xlabel("Actual capacity, mg/g")
-    ax.set_ylabel("Predicted capacity, mg/g")
-    ax.set_title("Actual vs Predicted")
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
+        pore_diameter = input_field(
+            "Диаметр пор, нм",
+            "Pore diameter (nm)",
+            "pore_diameter",
+            default_row,
+            metal,
+            0.001,
+            0.1,
+            "%.3f"
+        )
 
-    st.markdown("#### Примеры прогнозов")
-    st.dataframe(
-        test_results[
-            [
-                "Heavy metal",
-                "Contact time (min)",
-                "Initial concentration (mg/L)",
-                "Actual capacity (mg/g)",
-                "Predicted capacity (mg/g)",
-                "Absolute error (mg/g)"
-            ]
-        ].head(30),
+        pore_volume = input_field(
+            "Общий объём пор, см³/г",
+            "Total pore volume (cm³/g)",
+            "pore_volume",
+            default_row,
+            metal,
+            0.0001,
+            0.01,
+            "%.4f"
+        )
+
+        activation = input_field(
+            "Температура активации, °C",
+            "Activation temperature (°C)",
+            "activation",
+            default_row,
+            metal,
+            0.0,
+            10.0
+        )
+
+    st.markdown("")
+
+    submitted = st.form_submit_button(
+        "Рассчитать прогноз",
+        type="primary",
         use_container_width=True
     )
 
 
-# =========================================================
-# TAB 3 — FEATURE IMPORTANCE
-# =========================================================
-with tab3:
-    st.subheader("Какие признаки сильнее влияют на прогноз")
+# ======================================================
+# PREDICTION
+# ======================================================
 
-    fi = get_feature_importance(pipeline)
-    st.dataframe(fi, use_container_width=True)
+if submitted:
 
-    top = fi.head(12).sort_values("Importance")
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.barh(top["Feature"], top["Importance"])
-    ax.set_xlabel("Feature importance")
-    ax.set_title("Random Forest feature importance")
-    ax.grid(True, axis="x", alpha=0.3)
-    st.pyplot(fig)
-
-    st.caption(
-        "Feature importance показывает, насколько часто и насколько полезно "
-        "Random Forest использовал признак при построении деревьев. "
-        "Это не доказывает причинно-следственную связь."
+    st.session_state.pop(
+        "prediction_result",
+        None
     )
 
+    properties = get_metal_properties(metal)
 
-# =========================================================
-# TAB 4 — DATASET
-# =========================================================
-with tab4:
-    st.subheader("Открытый экспериментальный набор данных")
+    values = {
+        "Dose (g/L)": dose,
+        "Initial concentration (mg/L)": concentration,
+        "Contact time (min)": contact_time,
+        "pH": ph,
+        "BET surface area (m²/g)": bet,
+        "Pore diameter (nm)": pore_diameter,
+        "Total pore volume (cm³/g)": pore_volume,
+        "Activation temperature (°C)": activation,
+        "Temperature (°C)": temperature
+    }
 
-    st.write(f"Количество записей: **{len(df)}**")
-    st.write(f"Количество металлов: **{df['Heavy metal'].nunique()}**")
+    values.update(properties)
 
-    counts = (
-        df["Heavy metal"]
-        .value_counts()
-        .rename_axis("Heavy metal")
-        .reset_index(name="Number of observations")
+    sample = pd.DataFrame(
+        [values],
+        columns=FEATURES
     )
-    st.dataframe(counts, use_container_width=True)
 
-    st.markdown("#### Фрагмент исходных данных")
-    st.dataframe(df.head(100), use_container_width=True)
+    predicted_qe = float(
+        model.predict(sample)[0]
+    )
+
+    # Проверка баланса массы
+    max_possible_qe = concentration / dose
+
+    if (
+        not np.isfinite(predicted_qe)
+        or predicted_qe <= 0
+        or predicted_qe > max_possible_qe + 1e-8
+    ):
+
+        st.error(
+            "Для этих параметров не удалось "
+            "получить допустимый прогноз. "
+            "Измените входные значения."
+        )
+
+    else:
+
+        # Metal mass to be removed (mg)
+        metal_to_remove = (
+            concentration
+            * water_volume
+            * target_removal
+            / 100
+        )
+
+        # Theoretical sorbent mass (g)
+        required_mass = (
+            metal_to_remove / predicted_qe
+        )
+
+        export_record = {
+            "Загрязнитель": metal,
+            "Концентрация, мг/л": concentration,
+            "Объём воды, л": water_volume,
+            "pH": ph,
+            "Температура воды, °C": temperature,
+            "Время контакта, мин": contact_time,
+            "Желаемое удаление, %": target_removal,
+            "Дозировка угля, г/л": dose,
+            "BET, м²/г": bet,
+            "Диаметр пор, нм": pore_diameter,
+            "Объём пор, см³/г": pore_volume,
+            "Температура активации, °C": activation,
+            "Прогноз Qe, мг/г": round(
+                predicted_qe, 4
+            ),
+            "Теоретическая масса угля, г": round(
+                required_mass, 4
+            )
+        }
+
+        st.session_state["prediction_result"] = {
+            "metal": metal,
+            "qe": predicted_qe,
+            "mass": required_mass,
+            "excel": create_excel(export_record)
+        }
+
+
+# ======================================================
+# RESULTS
+# ======================================================
+
+result = st.session_state.get(
+    "prediction_result"
+)
+
+if result is not None and result["metal"] == metal:
+
+    st.divider()
+
+    st.subheader("Результат расчёта")
+
+    col1, col2 = st.columns(
+        2,
+        gap="large"
+    )
+
+    with col1:
+
+        st.metric(
+            "Сорбционная ёмкость Qe",
+            f"{result['qe']:.2f} мг/г"
+        )
+
+    with col2:
+
+        st.metric(
+            "Теоретическая масса угля",
+            f"{result['mass']:.2f} г"
+        )
+
+    st.markdown("")
 
     st.download_button(
-        "Скачать подготовленный CSV",
-        data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="heavy_metal_adsorption_dataset.csv",
-        mime="text/csv"
+        "Скачать результат (Excel)",
+        data=result["excel"],
+        file_name="WaterFilterAI_Result.xlsx",
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        use_container_width=True
     )
 
-
-# =========================================================
-# TAB 5 — OUR EXPERIMENT
-# =========================================================
-with tab5:
-    st.subheader("Результаты собственного лабораторного эксперимента")
-
-    st.write(
-        ""
-    )
-
-    own_data = pd.DataFrame([
-        ["Co", 0.5, "Без угля", 11.52],
-        ["Co", 1.0, "Без угля", 23.56],
-        ["Co", 1.5, "Без угля", 36.34],
-        ["Co", 2.0, "Без угля", 38.32],
-        ["Co", 0.5, "С активированным углём", 25.43],
-        ["Co", 1.0, "С активированным углём", 41.93],
-        ["Co", 1.5, "С активированным углём", 62.87],
-        ["Co", 2.0, "С активированным углём", 64.56],
-
-        ["Cu", 0.5, "Без угля", 12.63],
-        ["Cu", 1.0, "Без угля", 25.24],
-        ["Cu", 1.5, "Без угля", 39.69],
-        ["Cu", 2.0, "Без угля", 41.49],
-        ["Cu", 0.5, "С активированным углём", 27.04],
-        ["Cu", 1.0, "С активированным углём", 45.10],
-        ["Cu", 1.5, "С активированным углём", 68.10],
-        ["Cu", 2.0, "С активированным углём", 69.53],
-    ], columns=[
-        "Металл",
-        "Время контакта, ч",
-        "Тип сорбента",
-        "Сорбционная ёмкость, мг/г"
-    ])
-
-    st.markdown("#### Таблица экспериментальных данных")
-    st.dataframe(own_data, use_container_width=True)
-
-    st.markdown("#### График Cu(II)")
-    cu = own_data[own_data["Металл"] == "Cu"].copy()
-
-    fig_cu, ax_cu = plt.subplots(figsize=(8, 5))
-    for sorbent in cu["Тип сорбента"].unique():
-        temp = cu[cu["Тип сорбента"] == sorbent].sort_values("Время контакта, ч")
-        ax_cu.plot(
-            temp["Время контакта, ч"],
-            temp["Сорбционная ёмкость, мг/г"],
-            marker="o",
-            label=sorbent
-        )
-    ax_cu.set_xlabel("Время контакта, ч")
-    ax_cu.set_ylabel("Сорбционная ёмкость, мг/г")
-    ax_cu.set_title("Экспериментальная сорбция Cu(II)")
-    ax_cu.grid(True, alpha=0.3)
-    ax_cu.legend()
-    st.pyplot(fig_cu)
-
-    st.markdown("#### График Co(II)")
-    co = own_data[own_data["Металл"] == "Co"].copy()
-
-    fig_co, ax_co = plt.subplots(figsize=(8, 5))
-    for sorbent in co["Тип сорбента"].unique():
-        temp = co[co["Тип сорбента"] == sorbent].sort_values("Время контакта, ч")
-        ax_co.plot(
-            temp["Время контакта, ч"],
-            temp["Сорбционная ёмкость, мг/г"],
-            marker="o",
-            label=sorbent
-        )
-    ax_co.set_xlabel("Время контакта, ч")
-    ax_co.set_ylabel("Сорбционная ёмкость, мг/г")
-    ax_co.set_title("Экспериментальная сорбция Co(II)")
-    ax_co.grid(True, alpha=0.3)
-    ax_co.legend()
-    st.pyplot(fig_co)
-
-    cu_2h_no = own_data[
-        (own_data["Металл"] == "Cu") &
-        (own_data["Время контакта, ч"] == 2.0) &
-        (own_data["Тип сорбента"] == "Без угля")
-    ]["Сорбционная ёмкость, мг/г"].iloc[0]
-
-    cu_2h_carbon = own_data[
-        (own_data["Металл"] == "Cu") &
-        (own_data["Время контакта, ч"] == 2.0) &
-        (own_data["Тип сорбента"] == "С активированным углём")
-    ]["Сорбционная ёмкость, мг/г"].iloc[0]
-
-    co_2h_no = own_data[
-        (own_data["Металл"] == "Co") &
-        (own_data["Время контакта, ч"] == 2.0) &
-        (own_data["Тип сорбента"] == "Без угля")
-    ]["Сорбционная ёмкость, мг/г"].iloc[0]
-
-    co_2h_carbon = own_data[
-        (own_data["Металл"] == "Co") &
-        (own_data["Время контакта, ч"] == 2.0) &
-        (own_data["Тип сорбента"] == "С активированным углём")
-    ]["Сорбционная ёмкость, мг/г"].iloc[0]
-
-    st.markdown("#### Краткий вывод")
-    st.write(
-        f"При времени контакта 2 часа для Cu(II) сорбционная ёмкость составила "
-        f"**{cu_2h_no:.2f} мг/г** без угля и **{cu_2h_carbon:.2f} мг/г** "
-        f"с активированным углём. Для Co(II) — **{co_2h_no:.2f} мг/г** "
-        f"и **{co_2h_carbon:.2f} мг/г** соответственно."
-    )
-
-    st.info(
-        " "
-        "."
-    )
-
-# =========================================================
-# TAB 6 — ABOUT
-# =========================================================
-with tab6:
-    st.subheader("Архитектура системы")
-
-    st.markdown(
-        """
-**1. Источник данных**  
-Открытые экспериментальные данные по адсорбции тяжёлых металлов активированным углём.
-
-**2. Подготовка данных**  
-Категориальный признак `Heavy metal` кодируется автоматически.  
-Числовые экспериментальные и физико-химические параметры передаются модели без масштабирования.
-
-**3. Модель**  
-`RandomForestRegressor` из библиотеки scikit-learn.
-
-**4. Выход модели**  
-Прогноз `Adsorption capacity (mg/g)`.
-
-**5. Веб-интерфейс**  
-
-        """
-    )
-
-    st.warning(
-        " "
-        ""
-        ""
+    st.caption(
+        "Расчёт является ориентировочным "
+        "и требует экспериментального подтверждения."
     )
